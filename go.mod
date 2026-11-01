@@ -12,4 +12,4 @@ require (
 
 require golang.org/x/text v0.21.0 // indirect
 
-replace github.com/metacubex/sing => github.com/Herta-Network/sing v0.0.0-20261101103341-a402b0b490ba
+replace github.com/metacubex/sing => github.com/Herta-Network/sing v0.0.0-20261101142927-1d1b6994cf4a

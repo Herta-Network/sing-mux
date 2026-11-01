@@ -202,7 +202,7 @@ func (c *clientPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) 
 }
 
 func (c *clientPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	n, err := c.WritePacketBatchCount([]*buf.Buffer{buf.As(p)}, []M.Socksaddr{M.SocksaddrFromNet(addr)})
+	n, err := c.writePacketCount(buf.As(p), M.SocksaddrFromNet(addr))
 	if n == 1 {
 		return len(p), err
 	}
@@ -218,7 +218,7 @@ func (c *clientPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksad
 }
 
 func (c *clientPacketConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
-	_, err := c.WritePacketBatchCount([]*buf.Buffer{b}, []M.Socksaddr{d})
+	_, err := c.writePacketCount(b, d)
 	return err
 }
 
@@ -298,7 +298,7 @@ func (c *clientPacketAddrConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 }
 
 func (c *clientPacketAddrConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	n, err := c.WritePacketBatchCount([]*buf.Buffer{buf.As(p)}, []M.Socksaddr{M.SocksaddrFromNet(addr)})
+	n, err := c.writePacketCount(buf.As(p), M.SocksaddrFromNet(addr))
 	if n == 1 {
 		return len(p), err
 	}
@@ -327,7 +327,7 @@ func (c *clientPacketAddrConn) ReadPacket(buffer *buf.Buffer) (destination M.Soc
 }
 
 func (c *clientPacketAddrConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
-	_, err := c.WritePacketBatchCount([]*buf.Buffer{b}, []M.Socksaddr{d})
+	_, err := c.writePacketCount(b, d)
 	return err
 }
 

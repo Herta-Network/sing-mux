@@ -1,5 +1,5 @@
-github.com/Herta-Network/sing v0.0.0-20261101103341-a402b0b490ba h1:vAXE63qsaFJD4GAfa3l+6ChMuPHiqHp19ScWTYgozqM=
-github.com/Herta-Network/sing v0.0.0-20261101103341-a402b0b490ba/go.mod h1:ynXUNwUt4dfOFO805EWzw3ORmNWXoexziwn5XYCfsq8=
+github.com/Herta-Network/sing v0.0.0-20261101142927-1d1b6994cf4a h1:2MdsyCoPHbaumY1aaifLVbL7srBsxX3p5GVcu1FwlEA=
+github.com/Herta-Network/sing v0.0.0-20261101142927-1d1b6994cf4a/go.mod h1:ynXUNwUt4dfOFO805EWzw3ORmNWXoexziwn5XYCfsq8=
 github.com/metacubex/smux v0.0.0-20250503055512-501391591dee h1:lp6hJ+4wCLZu113awp7P6odM2okB5s60HUyF0FMqKmo=
 github.com/metacubex/smux v0.0.0-20250503055512-501391591dee/go.mod h1:4bPD8HWx9jPJ9aE4uadgyN7D1/Wz3KmPy+vale8sKLE=
 github.com/metacubex/yamux v0.0.0-20250918083631-dd5f17c0be49 h1:lhlqpYHopuTLx9xQt22kSA9HtnyTDmk5XjjQVCGHe2E=

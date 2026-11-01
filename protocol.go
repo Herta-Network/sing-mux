@@ -154,8 +154,8 @@ func EncodeStreamRequest(request StreamRequest, buffer *buf.Buffer) error {
 			destination = Destination
 		}
 	}
-	common.Must(binary.Write(buffer, binary.BigEndian, flags))
-	return M.SocksaddrSerializer.WriteAddrPort(buffer, destination)
+	binary.BigEndian.PutUint16(buffer.Extend(2), flags)
+	return M.SocksaddrSerializer.WriteAddrPortBuffer(buffer, destination)
 }
 
 type StreamResponse struct {

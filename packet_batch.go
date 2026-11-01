@@ -17,10 +17,13 @@ import (
 const packetBatchLimit = 64
 
 type packetWriteState struct {
-	err      error // protected by the connection's access mutex
-	closed   atomic.Bool
-	once     sync.Once
-	closeErr error
+	err               error // protected by the connection's access mutex
+	closed            atomic.Bool
+	once              sync.Once
+	closeErr          error
+	writer            N.VectorisedWriterWithCount
+	singleBuffer      [1]*buf.Buffer
+	singleDestination [1]M.Socksaddr
 }
 
 func (s *packetWriteState) close(conn io.Closer) error {
@@ -46,6 +49,22 @@ type packetPrepare func(*buf.Buffer, M.Socksaddr) (*buf.Buffer, error)
 func (s *packetWriteState) write(access *sync.Mutex, conn N.ExtendedConn, buffers []*buf.Buffer, destinations []M.Socksaddr, bound *M.Socksaddr, prepare packetPrepare) (written int, err error) {
 	access.Lock()
 	defer access.Unlock()
+	return s.writeLocked(conn, buffers, destinations, bound, prepare)
+}
+
+func (s *packetWriteState) writeOne(access *sync.Mutex, conn N.ExtendedConn, buffer *buf.Buffer, destination M.Socksaddr, bound *M.Socksaddr, prepare packetPrepare) (int, error) {
+	access.Lock()
+	defer access.Unlock()
+	s.singleBuffer[0] = buffer
+	s.singleDestination[0] = destination
+	defer func() {
+		s.singleBuffer[0] = nil
+		s.singleDestination[0] = M.Socksaddr{}
+	}()
+	return s.writeLocked(conn, s.singleBuffer[:], s.singleDestination[:], bound, prepare)
+}
+
+func (s *packetWriteState) writeLocked(conn N.ExtendedConn, buffers []*buf.Buffer, destinations []M.Socksaddr, bound *M.Socksaddr, prepare packetPrepare) (written int, err error) {
 	if err = s.check(); err != nil {
 		buf.ReleaseMulti(buffers)
 		return
@@ -63,6 +82,9 @@ func (s *packetWriteState) write(access *sync.Mutex, conn N.ExtendedConn, buffer
 			buf.ReleaseMulti(buffers)
 			return 0, os.ErrInvalid
 		}
+	}
+	if s.writer == nil {
+		s.writer = bufio.NewVectorisedWriterWithCount(conn)
 	}
 	for start := 0; start < len(buffers); {
 		if err = s.check(); err != nil {
@@ -89,7 +111,7 @@ func (s *packetWriteState) write(access *sync.Mutex, conn N.ExtendedConn, buffer
 			total += int64(buffers[i].Len())
 			ends[i-start] = total
 		}
-		n, writeErr := bufio.NewVectorisedWriterWithCount(conn).WriteVectorisedCount(buffers[start:end])
+		n, writeErr := s.writer.WriteVectorisedCount(buffers[start:end])
 		if n < 0 || n > total {
 			n, writeErr = 0, io.ErrShortWrite
 		} else if n != total && writeErr == nil {
@@ -124,7 +146,7 @@ func prepareClientPacket(buffer *buf.Buffer, dest M.Socksaddr, request StreamReq
 	buffer = (N.ReadWaitOptions{FrontHeadroom: requestLen + headerLen}).Copy(buffer)
 	header := buf.With(buffer.ExtendHeader(headerLen))
 	if request.PacketAddr {
-		if err := M.SocksaddrSerializer.WriteAddrPort(header, dest); err != nil {
+		if err := M.SocksaddrSerializer.WriteAddrPortBuffer(header, dest); err != nil {
 			return buffer, err
 		}
 	}
@@ -153,7 +175,7 @@ func prepareServerPacket(buffer *buf.Buffer, dest M.Socksaddr, packetAddr bool, 
 		*written = true
 	}
 	if packetAddr {
-		if err := M.SocksaddrSerializer.WriteAddrPort(header, dest); err != nil {
+		if err := M.SocksaddrSerializer.WriteAddrPortBuffer(header, dest); err != nil {
 			return buffer, err
 		}
 	}
@@ -185,3 +207,27 @@ func (c *clientPacketConn) Close() error     { return c.packetWrites.close(c.con
 func (c *clientPacketAddrConn) Close() error { return c.packetWrites.close(c.conn) }
 func (c *serverPacketConn) Close() error     { return c.packetWrites.close(c.ExtendedConn) }
 func (c *serverPacketAddrConn) Close() error { return c.packetWrites.close(c.ExtendedConn) }
+
+func (c *clientPacketConn) writePacketCount(buffer *buf.Buffer, destination M.Socksaddr) (int, error) {
+	return c.packetWrites.writeOne(&c.access, c.conn, buffer, destination, &c.destination, func(b *buf.Buffer, d M.Socksaddr) (*buf.Buffer, error) {
+		return prepareClientPacket(b, d, StreamRequest{Network: N.NetworkUDP, Destination: c.destination}, &c.requestWritten)
+	})
+}
+
+func (c *clientPacketAddrConn) writePacketCount(buffer *buf.Buffer, destination M.Socksaddr) (int, error) {
+	return c.packetWrites.writeOne(&c.access, c.conn, buffer, destination, nil, func(b *buf.Buffer, d M.Socksaddr) (*buf.Buffer, error) {
+		return prepareClientPacket(b, d, StreamRequest{Network: N.NetworkUDP, Destination: c.destination, PacketAddr: true}, &c.requestWritten)
+	})
+}
+
+func (c *serverPacketConn) writePacketCount(buffer *buf.Buffer, destination M.Socksaddr) (int, error) {
+	return c.packetWrites.writeOne(&c.access, c.ExtendedConn, buffer, destination, &c.destination, func(b *buf.Buffer, d M.Socksaddr) (*buf.Buffer, error) {
+		return prepareServerPacket(b, d, false, &c.responseWritten)
+	})
+}
+
+func (c *serverPacketAddrConn) writePacketCount(buffer *buf.Buffer, destination M.Socksaddr) (int, error) {
+	return c.packetWrites.writeOne(&c.access, c.ExtendedConn, buffer, destination, nil, func(b *buf.Buffer, d M.Socksaddr) (*buf.Buffer, error) {
+		return prepareServerPacket(b, d, true, &c.responseWritten)
+	})
+}
