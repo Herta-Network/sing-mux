@@ -78,11 +78,14 @@ func (c *serverConn) Upstream() any {
 type serverPacketConn struct {
 	N.ExtendedConn
 	access          sync.Mutex
+	packetWrites    packetWriteState
 	destination     M.Socksaddr
 	responseWritten bool
 }
 
 func (c *serverPacketConn) NeedHandshake() bool {
+	c.access.Lock()
+	defer c.access.Unlock()
 	return !c.responseWritten
 }
 
@@ -111,16 +114,9 @@ func (c *serverPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksad
 	return
 }
 
-func (c *serverPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	c.access.Lock()
-	defer c.access.Unlock()
-	pLen := buffer.Len()
-	common.Must(binary.Write(buf.With(buffer.ExtendHeader(2)), binary.BigEndian, uint16(pLen)))
-	if !c.responseWritten {
-		buffer.ExtendHeader(1)[0] = statusSuccess
-		c.responseWritten = true
-	}
-	return c.ExtendedConn.WriteBuffer(buffer)
+func (c *serverPacketConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
+	_, err := c.WritePacketBatchCount([]*buf.Buffer{b}, []M.Socksaddr{d})
+	return err
 }
 
 func (c *serverPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
@@ -133,24 +129,22 @@ func (c *serverPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) 
 		return 0, nil, io.ErrShortBuffer
 	}
 	n, err = io.ReadFull(c.ExtendedConn, p[:length])
+	if err == nil {
+		if c.destination.IsFqdn() {
+			addr = c.destination
+		} else {
+			addr = c.destination.UDPAddr()
+		}
+	}
 	return
 }
 
-func (c *serverPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	c.access.Lock()
-	defer c.access.Unlock()
-	if !c.responseWritten {
-		_, err = c.ExtendedConn.Write([]byte{statusSuccess})
-		if err != nil {
-			return
-		}
-		c.responseWritten = true
+func (c *serverPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	n, err := c.WritePacketBatchCount([]*buf.Buffer{buf.As(p)}, []M.Socksaddr{M.SocksaddrFromNet(addr)})
+	if n == 1 {
+		return len(p), err
 	}
-	err = binary.Write(c.ExtendedConn, binary.BigEndian, uint16(len(p)))
-	if err != nil {
-		return
-	}
-	return c.ExtendedConn.Write(p)
+	return 0, err
 }
 
 func (c *serverPacketConn) NeedAdditionalReadDeadline() bool {
@@ -162,19 +156,19 @@ func (c *serverPacketConn) Upstream() any {
 }
 
 func (c *serverPacketConn) FrontHeadroom() int {
-	if !c.responseWritten {
-		return 3
-	}
-	return 2
+	return 3
 }
 
 type serverPacketAddrConn struct {
 	N.ExtendedConn
 	access          sync.Mutex
+	packetWrites    packetWriteState
 	responseWritten bool
 }
 
 func (c *serverPacketAddrConn) NeedHandshake() bool {
+	c.access.Lock()
+	defer c.access.Unlock()
 	return !c.responseWritten
 }
 
@@ -211,25 +205,12 @@ func (c *serverPacketAddrConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 	return
 }
 
-func (c *serverPacketAddrConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	c.access.Lock()
-	defer c.access.Unlock()
-	if !c.responseWritten {
-		_, err = c.ExtendedConn.Write([]byte{statusSuccess})
-		if err != nil {
-			return
-		}
-		c.responseWritten = true
+func (c *serverPacketAddrConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	n, err := c.WritePacketBatchCount([]*buf.Buffer{buf.As(p)}, []M.Socksaddr{M.SocksaddrFromNet(addr)})
+	if n == 1 {
+		return len(p), err
 	}
-	err = M.SocksaddrSerializer.WriteAddrPort(c.ExtendedConn, M.SocksaddrFromNet(addr))
-	if err != nil {
-		return
-	}
-	err = binary.Write(c.ExtendedConn, binary.BigEndian, uint16(len(p)))
-	if err != nil {
-		return
-	}
-	return c.ExtendedConn.Write(p)
+	return 0, err
 }
 
 func (c *serverPacketAddrConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
@@ -249,20 +230,9 @@ func (c *serverPacketAddrConn) ReadPacket(buffer *buf.Buffer) (destination M.Soc
 	return
 }
 
-func (c *serverPacketAddrConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	c.access.Lock()
-	defer c.access.Unlock()
-	pLen := buffer.Len()
-	common.Must(binary.Write(buf.With(buffer.ExtendHeader(2)), binary.BigEndian, uint16(pLen)))
-	err := M.SocksaddrSerializer.WriteAddrPort(buf.With(buffer.ExtendHeader(M.SocksaddrSerializer.AddrPortLen(destination))), destination)
-	if err != nil {
-		return err
-	}
-	if !c.responseWritten {
-		buffer.ExtendHeader(1)[0] = statusSuccess
-		c.responseWritten = true
-	}
-	return c.ExtendedConn.WriteBuffer(buffer)
+func (c *serverPacketAddrConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
+	_, err := c.WritePacketBatchCount([]*buf.Buffer{b}, []M.Socksaddr{d})
+	return err
 }
 
 func (c *serverPacketAddrConn) NeedAdditionalReadDeadline() bool {
@@ -274,8 +244,5 @@ func (c *serverPacketAddrConn) Upstream() any {
 }
 
 func (c *serverPacketAddrConn) FrontHeadroom() int {
-	if !c.responseWritten {
-		return 3 + M.MaxSocksaddrLength
-	}
-	return 2 + M.MaxSocksaddrLength
+	return 3 + M.MaxSocksaddrLength
 }

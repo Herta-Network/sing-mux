@@ -1,6 +1,6 @@
 module github.com/metacubex/sing-mux
 
-go 1.18
+go 1.20
 
 require (
 	github.com/metacubex/sing v0.5.7
@@ -11,3 +11,5 @@ require (
 )
 
 require golang.org/x/text v0.21.0 // indirect
+
+replace github.com/metacubex/sing => github.com/Herta-Network/sing v0.0.0-20261101103341-a402b0b490ba

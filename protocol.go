@@ -135,11 +135,11 @@ func ReadStreamRequest(reader io.Reader) (*StreamRequest, error) {
 }
 
 func streamRequestLen(request StreamRequest) int {
-	var rLen int
-	rLen += 1 // version
-	rLen += 2 // flags
-	rLen += M.SocksaddrSerializer.AddrPortLen(request.Destination)
-	return rLen
+	destination := request.Destination
+	if request.PacketAddr && !destination.IsValid() {
+		destination = Destination
+	}
+	return 2 + M.SocksaddrSerializer.AddrPortLen(destination)
 }
 
 func EncodeStreamRequest(request StreamRequest, buffer *buf.Buffer) error {

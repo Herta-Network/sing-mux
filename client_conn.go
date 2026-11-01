@@ -6,7 +6,6 @@ import (
 	"net"
 	"sync"
 
-	"github.com/metacubex/sing/common"
 	"github.com/metacubex/sing/common/buf"
 	E "github.com/metacubex/sing/common/exceptions"
 	M "github.com/metacubex/sing/common/metadata"
@@ -107,6 +106,7 @@ type clientPacketConn struct {
 	N.AbstractConn
 	conn            N.ExtendedConn
 	access          sync.Mutex
+	packetWrites    packetWriteState
 	destination     M.Socksaddr
 	requestWritten  bool
 	responseRead    bool
@@ -114,6 +114,8 @@ type clientPacketConn struct {
 }
 
 func (c *clientPacketConn) NeedHandshake() bool {
+	c.access.Lock()
+	defer c.access.Unlock()
 	return !c.requestWritten
 }
 
@@ -147,47 +149,7 @@ func (c *clientPacketConn) Read(b []byte) (n int, err error) {
 	return io.ReadFull(c.conn, b[:length])
 }
 
-func (c *clientPacketConn) writeRequest(payload []byte) (n int, err error) {
-	request := StreamRequest{
-		Network:     N.NetworkUDP,
-		Destination: c.destination,
-	}
-	rLen := streamRequestLen(request)
-	if len(payload) > 0 {
-		rLen += 2 + len(payload)
-	}
-	buffer := buf.NewSize(rLen)
-	defer buffer.Release()
-	err = EncodeStreamRequest(request, buffer)
-	if err != nil {
-		return
-	}
-	if len(payload) > 0 {
-		common.Must(
-			binary.Write(buffer, binary.BigEndian, uint16(len(payload))),
-			common.Error(buffer.Write(payload)),
-		)
-	}
-	_, err = c.conn.Write(buffer.Bytes())
-	if err != nil {
-		return
-	}
-	c.requestWritten = true
-	return len(payload), nil
-}
-
-func (c *clientPacketConn) Write(b []byte) (n int, err error) {
-	c.access.Lock()
-	defer c.access.Unlock()
-	if !c.requestWritten {
-		return c.writeRequest(b)
-	}
-	err = binary.Write(c.conn, binary.BigEndian, uint16(len(b)))
-	if err != nil {
-		return
-	}
-	return c.conn.Write(b)
-}
+func (c *clientPacketConn) Write(p []byte) (int, error) { return c.WriteTo(p, c.destination) }
 
 func (c *clientPacketConn) ReadBuffer(buffer *buf.Buffer) (err error) {
 	if !c.responseRead {
@@ -206,17 +168,7 @@ func (c *clientPacketConn) ReadBuffer(buffer *buf.Buffer) (err error) {
 	return
 }
 
-func (c *clientPacketConn) WriteBuffer(buffer *buf.Buffer) error {
-	c.access.Lock()
-	defer c.access.Unlock()
-	if !c.requestWritten {
-		defer buffer.Release()
-		return common.Error(c.writeRequest(buffer.Bytes()))
-	}
-	bLen := buffer.Len()
-	binary.BigEndian.PutUint16(buffer.ExtendHeader(2), uint16(bLen))
-	return c.conn.WriteBuffer(buffer)
-}
+func (c *clientPacketConn) WriteBuffer(b *buf.Buffer) error { return c.WritePacket(b, c.destination) }
 
 func (c *clientPacketConn) FrontHeadroom() int {
 	return 2
@@ -239,29 +191,35 @@ func (c *clientPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) 
 		return 0, nil, io.ErrShortBuffer
 	}
 	n, err = io.ReadFull(c.conn, p[:length])
+	if err == nil {
+		if c.destination.IsFqdn() {
+			addr = c.destination
+		} else {
+			addr = c.destination.UDPAddr()
+		}
+	}
 	return
 }
 
-func (c *clientPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	c.access.Lock()
-	defer c.access.Unlock()
-	if !c.requestWritten {
-		return c.writeRequest(p)
+func (c *clientPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	n, err := c.WritePacketBatchCount([]*buf.Buffer{buf.As(p)}, []M.Socksaddr{M.SocksaddrFromNet(addr)})
+	if n == 1 {
+		return len(p), err
 	}
-	err = binary.Write(c.conn, binary.BigEndian, uint16(len(p)))
-	if err != nil {
-		return
-	}
-	return c.conn.Write(p)
+	return 0, err
 }
 
 func (c *clientPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
 	err = c.ReadBuffer(buffer)
+	if err == nil {
+		destination = c.destination
+	}
 	return
 }
 
-func (c *clientPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	return c.WriteBuffer(buffer)
+func (c *clientPacketConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
+	_, err := c.WritePacketBatchCount([]*buf.Buffer{b}, []M.Socksaddr{d})
+	return err
 }
 
 func (c *clientPacketConn) LocalAddr() net.Addr {
@@ -286,6 +244,7 @@ type clientPacketAddrConn struct {
 	N.AbstractConn
 	conn            N.ExtendedConn
 	access          sync.Mutex
+	packetWrites    packetWriteState
 	destination     M.Socksaddr
 	requestWritten  bool
 	responseRead    bool
@@ -293,6 +252,8 @@ type clientPacketAddrConn struct {
 }
 
 func (c *clientPacketAddrConn) NeedHandshake() bool {
+	c.access.Lock()
+	defer c.access.Unlock()
 	return !c.requestWritten
 }
 
@@ -336,55 +297,12 @@ func (c *clientPacketAddrConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 	return
 }
 
-func (c *clientPacketAddrConn) writeRequest(payload []byte, destination M.Socksaddr) (n int, err error) {
-	request := StreamRequest{
-		Network:     N.NetworkUDP,
-		Destination: c.destination,
-		PacketAddr:  true,
+func (c *clientPacketAddrConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	n, err := c.WritePacketBatchCount([]*buf.Buffer{buf.As(p)}, []M.Socksaddr{M.SocksaddrFromNet(addr)})
+	if n == 1 {
+		return len(p), err
 	}
-	rLen := streamRequestLen(request)
-	if len(payload) > 0 {
-		rLen += M.SocksaddrSerializer.AddrPortLen(destination) + 2 + len(payload)
-	}
-	buffer := buf.NewSize(rLen)
-	defer buffer.Release()
-	err = EncodeStreamRequest(request, buffer)
-	if err != nil {
-		return
-	}
-	if len(payload) > 0 {
-		err = M.SocksaddrSerializer.WriteAddrPort(buffer, destination)
-		if err != nil {
-			return
-		}
-		common.Must(
-			binary.Write(buffer, binary.BigEndian, uint16(len(payload))),
-			common.Error(buffer.Write(payload)),
-		)
-	}
-	_, err = c.conn.Write(buffer.Bytes())
-	if err != nil {
-		return
-	}
-	c.requestWritten = true
-	return len(payload), nil
-}
-
-func (c *clientPacketAddrConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	c.access.Lock()
-	defer c.access.Unlock()
-	if !c.requestWritten {
-		return c.writeRequest(p, M.SocksaddrFromNet(addr))
-	}
-	err = M.SocksaddrSerializer.WriteAddrPort(c.conn, M.SocksaddrFromNet(addr))
-	if err != nil {
-		return
-	}
-	err = binary.Write(c.conn, binary.BigEndian, uint16(len(p)))
-	if err != nil {
-		return
-	}
-	return c.conn.Write(p)
+	return 0, err
 }
 
 func (c *clientPacketAddrConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
@@ -408,21 +326,9 @@ func (c *clientPacketAddrConn) ReadPacket(buffer *buf.Buffer) (destination M.Soc
 	return
 }
 
-func (c *clientPacketAddrConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	c.access.Lock()
-	defer c.access.Unlock()
-	if !c.requestWritten {
-		defer buffer.Release()
-		return common.Error(c.writeRequest(buffer.Bytes(), destination))
-	}
-	bLen := buffer.Len()
-	header := buf.With(buffer.ExtendHeader(M.SocksaddrSerializer.AddrPortLen(destination) + 2))
-	err := M.SocksaddrSerializer.WriteAddrPort(header, destination)
-	if err != nil {
-		return err
-	}
-	common.Must(binary.Write(header, binary.BigEndian, uint16(bLen)))
-	return c.conn.WriteBuffer(buffer)
+func (c *clientPacketAddrConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
+	_, err := c.WritePacketBatchCount([]*buf.Buffer{b}, []M.Socksaddr{d})
+	return err
 }
 
 func (c *clientPacketAddrConn) LocalAddr() net.Addr {
