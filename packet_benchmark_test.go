@@ -3,6 +3,7 @@ package mux
 import (
 	"fmt"
 	"net"
+	"sort"
 	"testing"
 	"time"
 
@@ -41,8 +42,16 @@ func benchmarkPacketWrites(b *testing.B, conn N.NetPacketConn, count int, readBa
 	defer received.Release()
 	b.SetBytes(int64(1200 * count))
 	b.ReportAllocs()
+	var samples []int64
+	if readBack {
+		samples = make([]int64, b.N)
+	}
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
+		var start time.Time
+		if readBack {
+			start = time.Now()
+		}
 		for i := range packets {
 			packets[i] = buf.NewSize(1500)
 			packets[i].Resize(300, 1200)
@@ -62,8 +71,16 @@ func benchmarkPacketWrites(b *testing.B, conn N.NetPacketConn, count int, readBa
 				}
 			}
 		}
+		if readBack {
+			samples[n] = time.Since(start).Nanoseconds()
+		}
 	}
 	b.StopTimer()
+	if readBack {
+		sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+		b.ReportMetric(float64(samples[(len(samples)-1)*95/100]), "p95-ns")
+		b.ReportMetric(float64(samples[(len(samples)-1)*99/100]), "p99-ns")
+	}
 }
 
 func BenchmarkPacketTCPRoundTrip(b *testing.B) {

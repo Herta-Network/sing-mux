@@ -1,8 +1,6 @@
 package mux
 
 import (
-	"encoding/binary"
-	"io"
 	"net"
 	"sync"
 
@@ -79,6 +77,7 @@ type serverPacketConn struct {
 	N.ExtendedConn
 	access          sync.Mutex
 	packetWrites    packetWriteState
+	packetReads     packetReadState
 	destination     M.Socksaddr
 	responseWritten bool
 }
@@ -100,18 +99,8 @@ func (c *serverPacketConn) HandshakeFailure(err error) error {
 	return common.Error(c.ExtendedConn.Write(buffer.Bytes()))
 }
 
-func (c *serverPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
-	var length uint16
-	err = binary.Read(c.ExtendedConn, binary.BigEndian, &length)
-	if err != nil {
-		return
-	}
-	_, err = buffer.ReadFullFrom(c.ExtendedConn, int(length))
-	if err != nil {
-		return
-	}
-	destination = c.destination
-	return
+func (c *serverPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	return c.packetReads.readBuffer(c.ExtendedConn, false, c.destination, nil, buffer)
 }
 
 func (c *serverPacketConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
@@ -119,24 +108,15 @@ func (c *serverPacketConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
 	return err
 }
 
-func (c *serverPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	var length uint16
-	err = binary.Read(c.ExtendedConn, binary.BigEndian, &length)
+func (c *serverPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, destination, err := c.packetReads.read(c.ExtendedConn, false, c.destination, nil, p)
 	if err != nil {
-		return
+		return n, nil, err
 	}
-	if cap(p) < int(length) {
-		return 0, nil, io.ErrShortBuffer
+	if destination.IsFqdn() {
+		return n, destination, nil
 	}
-	n, err = io.ReadFull(c.ExtendedConn, p[:length])
-	if err == nil {
-		if c.destination.IsFqdn() {
-			addr = c.destination
-		} else {
-			addr = c.destination.UDPAddr()
-		}
-	}
-	return
+	return n, destination.UDPAddr(), nil
 }
 
 func (c *serverPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
@@ -163,6 +143,7 @@ type serverPacketAddrConn struct {
 	N.ExtendedConn
 	access          sync.Mutex
 	packetWrites    packetWriteState
+	packetReads     packetReadState
 	responseWritten bool
 }
 
@@ -183,26 +164,15 @@ func (c *serverPacketAddrConn) HandshakeFailure(err error) error {
 	return common.Error(c.ExtendedConn.Write(buffer.Bytes()))
 }
 
-func (c *serverPacketAddrConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	destination, err := M.SocksaddrSerializer.ReadAddrPort(c.ExtendedConn)
+func (c *serverPacketAddrConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, destination, err := c.packetReads.read(c.ExtendedConn, true, M.Socksaddr{}, nil, p)
 	if err != nil {
-		return
+		return n, nil, err
 	}
 	if destination.IsFqdn() {
-		addr = destination
-	} else {
-		addr = destination.UDPAddr()
+		return n, destination, nil
 	}
-	var length uint16
-	err = binary.Read(c.ExtendedConn, binary.BigEndian, &length)
-	if err != nil {
-		return
-	}
-	if cap(p) < int(length) {
-		return 0, nil, io.ErrShortBuffer
-	}
-	n, err = io.ReadFull(c.ExtendedConn, p[:length])
-	return
+	return n, destination.UDPAddr(), nil
 }
 
 func (c *serverPacketAddrConn) WriteTo(p []byte, addr net.Addr) (int, error) {
@@ -213,21 +183,8 @@ func (c *serverPacketAddrConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return 0, err
 }
 
-func (c *serverPacketAddrConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
-	destination, err = M.SocksaddrSerializer.ReadAddrPort(c.ExtendedConn)
-	if err != nil {
-		return
-	}
-	var length uint16
-	err = binary.Read(c.ExtendedConn, binary.BigEndian, &length)
-	if err != nil {
-		return
-	}
-	_, err = buffer.ReadFullFrom(c.ExtendedConn, int(length))
-	if err != nil {
-		return
-	}
-	return
+func (c *serverPacketAddrConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	return c.packetReads.readBuffer(c.ExtendedConn, true, M.Socksaddr{}, nil, buffer)
 }
 
 func (c *serverPacketAddrConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {

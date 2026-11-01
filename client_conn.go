@@ -1,8 +1,6 @@
 package mux
 
 import (
-	"encoding/binary"
-	"io"
 	"net"
 	"sync"
 
@@ -104,13 +102,13 @@ var _ N.NetPacketConn = (*clientPacketConn)(nil)
 
 type clientPacketConn struct {
 	N.AbstractConn
-	conn            N.ExtendedConn
-	access          sync.Mutex
-	packetWrites    packetWriteState
-	destination     M.Socksaddr
-	requestWritten  bool
-	responseRead    bool
-	readWaitOptions N.ReadWaitOptions
+	conn           N.ExtendedConn
+	access         sync.Mutex
+	packetWrites   packetWriteState
+	packetReads    packetReadState
+	destination    M.Socksaddr
+	requestWritten bool
+	responseRead   bool
 }
 
 func (c *clientPacketConn) NeedHandshake() bool {
@@ -119,53 +117,16 @@ func (c *clientPacketConn) NeedHandshake() bool {
 	return !c.requestWritten
 }
 
-func (c *clientPacketConn) readResponse() error {
-	response, err := ReadStreamResponse(c.conn)
-	if err != nil {
-		return err
-	}
-	if response.Status == statusError {
-		return E.New("remote error: ", response.Message)
-	}
-	return nil
-}
-
-func (c *clientPacketConn) Read(b []byte) (n int, err error) {
-	if !c.responseRead {
-		err = c.readResponse()
-		if err != nil {
-			return
-		}
-		c.responseRead = true
-	}
-	var length uint16
-	err = binary.Read(c.conn, binary.BigEndian, &length)
-	if err != nil {
-		return
-	}
-	if cap(b) < int(length) {
-		return 0, io.ErrShortBuffer
-	}
-	return io.ReadFull(c.conn, b[:length])
+func (c *clientPacketConn) Read(p []byte) (int, error) {
+	n, _, err := c.packetReads.read(c.conn, false, c.destination, &c.responseRead, p)
+	return n, err
 }
 
 func (c *clientPacketConn) Write(p []byte) (int, error) { return c.WriteTo(p, c.destination) }
 
-func (c *clientPacketConn) ReadBuffer(buffer *buf.Buffer) (err error) {
-	if !c.responseRead {
-		err = c.readResponse()
-		if err != nil {
-			return
-		}
-		c.responseRead = true
-	}
-	var length uint16
-	err = binary.Read(c.conn, binary.BigEndian, &length)
-	if err != nil {
-		return
-	}
-	_, err = buffer.ReadFullFrom(c.conn, int(length))
-	return
+func (c *clientPacketConn) ReadBuffer(buffer *buf.Buffer) error {
+	_, err := c.ReadPacket(buffer)
+	return err
 }
 
 func (c *clientPacketConn) WriteBuffer(b *buf.Buffer) error { return c.WritePacket(b, c.destination) }
@@ -174,31 +135,15 @@ func (c *clientPacketConn) FrontHeadroom() int {
 	return 2
 }
 
-func (c *clientPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	if !c.responseRead {
-		err = c.readResponse()
-		if err != nil {
-			return
-		}
-		c.responseRead = true
-	}
-	var length uint16
-	err = binary.Read(c.conn, binary.BigEndian, &length)
+func (c *clientPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, destination, err := c.packetReads.read(c.conn, false, c.destination, &c.responseRead, p)
 	if err != nil {
-		return
+		return n, nil, err
 	}
-	if cap(p) < int(length) {
-		return 0, nil, io.ErrShortBuffer
+	if destination.IsFqdn() {
+		return n, destination, nil
 	}
-	n, err = io.ReadFull(c.conn, p[:length])
-	if err == nil {
-		if c.destination.IsFqdn() {
-			addr = c.destination
-		} else {
-			addr = c.destination.UDPAddr()
-		}
-	}
-	return
+	return n, destination.UDPAddr(), nil
 }
 
 func (c *clientPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
@@ -209,12 +154,8 @@ func (c *clientPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return 0, err
 }
 
-func (c *clientPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
-	err = c.ReadBuffer(buffer)
-	if err == nil {
-		destination = c.destination
-	}
-	return
+func (c *clientPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	return c.packetReads.readBuffer(c.conn, false, c.destination, &c.responseRead, buffer)
 }
 
 func (c *clientPacketConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
@@ -242,13 +183,13 @@ var _ N.NetPacketConn = (*clientPacketAddrConn)(nil)
 
 type clientPacketAddrConn struct {
 	N.AbstractConn
-	conn            N.ExtendedConn
-	access          sync.Mutex
-	packetWrites    packetWriteState
-	destination     M.Socksaddr
-	requestWritten  bool
-	responseRead    bool
-	readWaitOptions N.ReadWaitOptions
+	conn           N.ExtendedConn
+	access         sync.Mutex
+	packetWrites   packetWriteState
+	packetReads    packetReadState
+	destination    M.Socksaddr
+	requestWritten bool
+	responseRead   bool
 }
 
 func (c *clientPacketAddrConn) NeedHandshake() bool {
@@ -257,44 +198,15 @@ func (c *clientPacketAddrConn) NeedHandshake() bool {
 	return !c.requestWritten
 }
 
-func (c *clientPacketAddrConn) readResponse() error {
-	response, err := ReadStreamResponse(c.conn)
+func (c *clientPacketAddrConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, destination, err := c.packetReads.read(c.conn, true, M.Socksaddr{}, &c.responseRead, p)
 	if err != nil {
-		return err
-	}
-	if response.Status == statusError {
-		return E.New("remote error: ", response.Message)
-	}
-	return nil
-}
-
-func (c *clientPacketAddrConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	if !c.responseRead {
-		err = c.readResponse()
-		if err != nil {
-			return
-		}
-		c.responseRead = true
-	}
-	destination, err := M.SocksaddrSerializer.ReadAddrPort(c.conn)
-	if err != nil {
-		return
+		return n, nil, err
 	}
 	if destination.IsFqdn() {
-		addr = destination
-	} else {
-		addr = destination.UDPAddr()
+		return n, destination, nil
 	}
-	var length uint16
-	err = binary.Read(c.conn, binary.BigEndian, &length)
-	if err != nil {
-		return
-	}
-	if cap(p) < int(length) {
-		return 0, nil, io.ErrShortBuffer
-	}
-	n, err = io.ReadFull(c.conn, p[:length])
-	return
+	return n, destination.UDPAddr(), nil
 }
 
 func (c *clientPacketAddrConn) WriteTo(p []byte, addr net.Addr) (int, error) {
@@ -305,25 +217,8 @@ func (c *clientPacketAddrConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return 0, err
 }
 
-func (c *clientPacketAddrConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
-	if !c.responseRead {
-		err = c.readResponse()
-		if err != nil {
-			return
-		}
-		c.responseRead = true
-	}
-	destination, err = M.SocksaddrSerializer.ReadAddrPort(c.conn)
-	if err != nil {
-		return
-	}
-	var length uint16
-	err = binary.Read(c.conn, binary.BigEndian, &length)
-	if err != nil {
-		return
-	}
-	_, err = buffer.ReadFullFrom(c.conn, int(length))
-	return
+func (c *clientPacketAddrConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	return c.packetReads.readBuffer(c.conn, true, M.Socksaddr{}, &c.responseRead, buffer)
 }
 
 func (c *clientPacketAddrConn) WritePacket(b *buf.Buffer, d M.Socksaddr) error {
