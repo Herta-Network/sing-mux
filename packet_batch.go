@@ -17,13 +17,10 @@ import (
 const packetBatchLimit = 64
 
 type packetWriteState struct {
-	err               error // protected by the connection's access mutex
-	closed            atomic.Bool
-	once              sync.Once
-	closeErr          error
-	writer            N.VectorisedWriterWithCount
-	singleBuffer      [1]*buf.Buffer
-	singleDestination [1]M.Socksaddr
+	err      error // protected by the connection's access mutex
+	closed   atomic.Bool
+	once     sync.Once
+	closeErr error
 }
 
 func (s *packetWriteState) close(conn io.Closer) error {
@@ -55,13 +52,7 @@ func (s *packetWriteState) write(access *sync.Mutex, conn N.ExtendedConn, buffer
 func (s *packetWriteState) writeOne(access *sync.Mutex, conn N.ExtendedConn, buffer *buf.Buffer, destination M.Socksaddr, bound *M.Socksaddr, prepare packetPrepare) (int, error) {
 	access.Lock()
 	defer access.Unlock()
-	s.singleBuffer[0] = buffer
-	s.singleDestination[0] = destination
-	defer func() {
-		s.singleBuffer[0] = nil
-		s.singleDestination[0] = M.Socksaddr{}
-	}()
-	return s.writeLocked(conn, s.singleBuffer[:], s.singleDestination[:], bound, prepare)
+	return s.writeLocked(conn, []*buf.Buffer{buffer}, []M.Socksaddr{destination}, bound, prepare)
 }
 
 func (s *packetWriteState) writeLocked(conn N.ExtendedConn, buffers []*buf.Buffer, destinations []M.Socksaddr, bound *M.Socksaddr, prepare packetPrepare) (written int, err error) {
@@ -83,9 +74,7 @@ func (s *packetWriteState) writeLocked(conn N.ExtendedConn, buffers []*buf.Buffe
 			return 0, os.ErrInvalid
 		}
 	}
-	if s.writer == nil {
-		s.writer = bufio.NewVectorisedWriterWithCount(conn)
-	}
+	writer := bufio.NewVectorisedWriterWithCount(conn)
 	for start := 0; start < len(buffers); {
 		if err = s.check(); err != nil {
 			buf.ReleaseMulti(buffers[start:])
@@ -111,7 +100,7 @@ func (s *packetWriteState) writeLocked(conn N.ExtendedConn, buffers []*buf.Buffe
 			total += int64(buffers[i].Len())
 			ends[i-start] = total
 		}
-		n, writeErr := s.writer.WriteVectorisedCount(buffers[start:end])
+		n, writeErr := writer.WriteVectorisedCount(buffers[start:end])
 		if n < 0 || n > total {
 			n, writeErr = 0, io.ErrShortWrite
 		} else if n != total && writeErr == nil {

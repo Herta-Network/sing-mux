@@ -12,6 +12,6 @@ require (
 
 require golang.org/x/text v0.21.0 // indirect
 
-replace github.com/metacubex/sing => github.com/Herta-Network/sing v0.0.0-20261101154303-1260cbaedd25
+replace github.com/metacubex/sing => github.com/Herta-Network/sing v0.0.0-20261102035222-d9b3220a312b
 
-replace github.com/metacubex/smux => github.com/Herta-Network/smux v0.0.0-20261101154434-10aa72a7535c
+replace github.com/metacubex/smux => github.com/Herta-Network/smux v0.0.0-20261102035517-175a5e6183d0
